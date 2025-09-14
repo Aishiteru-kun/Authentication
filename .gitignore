@@ -1,0 +1,17 @@
+/Saved
+/Intermediate
+/DerivedDataCache
+/Binaries
+/Build
+/Builds
+.vs
+/*.sln
+/.idea
+
+#Rider
+*.user
+Blitz.uproject.DotSettings.user
+Plugins/Developer/RiderLink
+
+Plugins/**/Binaries/
+Plugins/**/Intermediate/
