@@ -13,5 +13,8 @@ struct FServerItemInfo : public FTableRowBase
 	FString ItemId;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Item")
+	FString Name;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Item")
 	TObjectPtr<UTexture2D> Icon;
 };

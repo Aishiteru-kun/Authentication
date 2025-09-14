@@ -7,6 +7,7 @@
 #include "Interface/WidgetInterface.h"
 #include "OwnerInventory.generated.h"
 
+class UScrollBox;
 class UTextBlock;
 class UItemSlot;
 class UVerticalBox;
@@ -26,7 +27,7 @@ protected:
 
 protected:
 	UPROPERTY(meta=(BindWidget))
-	TObjectPtr<UVerticalBox> ItemsBox;
+	TObjectPtr<UScrollBox> ItemsBox;
 
 	UPROPERTY(meta=(BindWidget))
 	TObjectPtr<UTextBlock> GoldAmount;

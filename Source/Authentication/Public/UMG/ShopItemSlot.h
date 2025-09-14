@@ -23,7 +23,13 @@ public:
 	void SetGoldPrice(int32 InGoldPrice);
 	virtual void SetQuantity(int32 InQuantity) const override;
 
-	void SetOnlyPriceMode(bool bInShowOnlyPrice) { bShowOnlyPrice = bInShowOnlyPrice; }
+	void SetOnlyPriceMode(bool bInShowOnlyPrice);
+
+	FText GetItemName() const;
+	FText GetQuantity() const;
+	int32 GetGoldPrice() const { return GoldPrice; }
+
+	FSlateBrush GetIconBrush() const;
 
 protected:
 	virtual void NativeConstruct() override;

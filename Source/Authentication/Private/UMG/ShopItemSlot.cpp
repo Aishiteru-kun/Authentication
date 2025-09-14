@@ -4,6 +4,7 @@
 #include "UMG/ShopItemSlot.h"
 
 #include "Components/Button.h"
+#include "Components/Image.h"
 #include "Components/TextBlock.h"
 
 void UShopItemSlot::SetGoldPrice(int32 InGoldPrice)
@@ -22,10 +23,35 @@ void UShopItemSlot::SetQuantity(int32 InQuantity) const
 
 	if (bShowOnlyPrice)
 	{
+		QuantityText->SetVisibility(ESlateVisibility::Hidden);
 		return;
 	}
 
+	QuantityText->SetVisibility(ESlateVisibility::Visible);
+
 	GoldPriceText->SetText(FText::AsNumber(InQuantity * GoldPrice));
+}
+
+void UShopItemSlot::SetOnlyPriceMode(bool bInShowOnlyPrice)
+{
+	bShowOnlyPrice = bInShowOnlyPrice;
+
+	QuantityText->SetVisibility(bShowOnlyPrice ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
+}
+
+FText UShopItemSlot::GetItemName() const
+{
+	return ItemNameText->GetText();
+}
+
+FText UShopItemSlot::GetQuantity() const
+{
+	return QuantityText->GetText();
+}
+
+FSlateBrush UShopItemSlot::GetIconBrush() const
+{
+	return IconImage->GetBrush();
 }
 
 void UShopItemSlot::NativeConstruct()
@@ -40,7 +66,5 @@ void UShopItemSlot::NativeConstruct()
 
 void UShopItemSlot::OnClicked()
 {
-	SetIsEnabled(false);
-
 	OnSelectedItemChanged.Broadcast(this);
 }

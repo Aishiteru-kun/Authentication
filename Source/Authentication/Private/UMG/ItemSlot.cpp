@@ -22,3 +22,8 @@ FText UItemSlot::GetQuantityText() const
 {
 	return QuantityText->GetText();
 }
+
+bool UItemSlot::IsEqual(const UItemSlot* Other) const
+{
+	return ItemNameText->GetText().ToString() == Other->ItemNameText->GetText().ToString();
+}

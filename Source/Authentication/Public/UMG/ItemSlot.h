@@ -20,6 +20,8 @@ public:
 	virtual void SetQuantity(int32 InQuantity) const;
 	FText GetQuantityText() const;
 
+	bool IsEqual(const UItemSlot* Other) const;
+
 protected:
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UTextBlock> ItemNameText;

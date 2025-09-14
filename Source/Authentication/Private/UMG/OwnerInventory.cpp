@@ -4,8 +4,8 @@
 #include "UMG/OwnerInventory.h"
 
 #include "GlobalStructs.h"
+#include "Components/ScrollBox.h"
 #include "Components/TextBlock.h"
-#include "Components/VerticalBox.h"
 #include "Player/MyPlayerState.h"
 #include "Subsystem/AuthApiClientSubsystem.h"
 #include "UMG/ItemSlot.h"
