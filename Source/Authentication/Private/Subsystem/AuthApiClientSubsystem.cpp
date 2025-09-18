@@ -1,520 +1,409 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "Subsystem/AuthApiClientSubsystem.h"
 
-#include "HttpModule.h"
+#include "Engine/World.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
+#include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
+#include "TimerManager.h"
 
-/////////////////////////////////////////////////////
-// Helpers
-
-FString UAuthApiClientSubsystem::MakeUrl(const FString& InPath) const
+static FString EncodeUrl(const FString& S)
 {
-	FString Base = ServerBaseUrl;
-	Base.RemoveFromEnd(TEXT("/"));
-
-	FString Path = InPath;
-	if (!Path.StartsWith(TEXT("/")))
-	{
-		Path = TEXT("/") + Path;
-	}
-	return Base + Path;
+	FString Out = S;
+	Out = FGenericPlatformHttp::UrlEncode(Out);
+	return Out;
 }
 
-void UAuthApiClientSubsystem::ParseJson(const FString& Text, TSharedPtr<FJsonObject>& OutObject, bool& bOutOK, FString& OutError) const
-{
-	bOutOK = false; OutError.Empty(); OutObject.Reset();
-	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
-	if (FJsonSerializer::Deserialize(Reader, OutObject) && OutObject.IsValid())
-	{
-		bOutOK = true;
-	}
-	else
-	{
-		OutError = TEXT("JSON parse error");
-	}
-}
-
-/////////////////////////////////////////////////////
-// Public API
-
-void UAuthApiClientSubsystem::CheckHealth(TFunction<void(bool bOK)> OnDone)
-{
-	SendGET(TEXT("/health"), [OnDone](bool bOK, const FString& Body, const FString& Err)
-	{
-		if (!bOK)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("Health check failed: %s | body=%s"), *Err, *Body);
-			OnDone(false);
-			return;
-		}
-		const bool bOkFlag = Body.Contains(TEXT("\"ok\":true"));
-		OnDone(bOkFlag);
-	});
-}
-
-// ----------- LOGIN -----------
-
-void UAuthApiClientSubsystem::RequestLoginByLogin(const FString& InLogin, const FString& InDescription, FOnLoginRequested OnDone)
-{
-	const FString Login = InLogin.TrimStartAndEnd();
-
-	UE_LOG(LogTemp, Log, TEXT("RequestLoginByLogin('%s')"), *Login);
-
-	if (Login.IsEmpty())
-	{
-		OnDone.ExecuteIfBound(false, TEXT(""), TEXT("Empty login (client)"));
-		return;
-	}
-
-	auto Root = MakeShared<FJsonObject>();
-	Root->SetStringField(TEXT("login"), Login);
-	Root->SetStringField(TEXT("description"), InDescription);
-
-	SendJsonPOST(TEXT("/auth/request_login"), Root,
-		[OnDone](bool bOK, const FString& Body, const FString& Err)
-	{
-		if (!bOK)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("RequestLoginByLogin failed: %s | body=%s"), *Err, *Body);
-			OnDone.ExecuteIfBound(false, TEXT(""), Err);
-			return;
-		}
-
-		TSharedPtr<FJsonObject> Obj; bool bParseOK=false;
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
-		if (FJsonSerializer::Deserialize(Reader, Obj) && Obj.IsValid()) bParseOK = true;
-
-		if (!bParseOK)
-		{
-			OnDone.ExecuteIfBound(false, TEXT(""), TEXT("JSON parse error"));
-			return;
-		}
-
-		const FString RequestId = Obj->GetStringField(TEXT("request_id"));
-		OnDone.ExecuteIfBound(true, RequestId, TEXT(""));
-	});
-}
-
-void UAuthApiClientSubsystem::PollLoginStatus(const FString& InRequestId, FOnLoginApproved OnDone, float TimeoutSeconds)
-{
-	if (!GetWorld())
-	{
-		OnDone.ExecuteIfBound(false, TEXT(""), TEXT("No World"));
-		return;
-	}
-
-	GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
-
-	const double StartTime = FPlatformTime::Seconds();
-	TWeakObjectPtr<UAuthApiClientSubsystem> WeakThis(this);
-
-	FTimerDelegate Tick;
-	Tick.BindLambda([this, WeakThis, InRequestId, OnDone, StartTime, TimeoutSeconds]()
-	{
-		if (!WeakThis.IsValid() || !GetWorld()) return;
-
-		const FString Path = FString::Printf(TEXT("/auth/status?request_id=%s"), *InRequestId);
-		SendGET(Path, [this, WeakThis, InRequestId, OnDone, StartTime, TimeoutSeconds]
-		(bool bOK, const FString& Body, const FString& Err)
-		{
-			if (!WeakThis.IsValid() || !GetWorld()) return;
-
-			if (!bOK)
-			{
-				if (FPlatformTime::Seconds() - StartTime >= TimeoutSeconds)
-				{
-					GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
-					OnDone.ExecuteIfBound(false, TEXT(""), Err.IsEmpty()?TEXT("Login timeout"):Err);
-				}
-				return;
-			}
-
-			TSharedPtr<FJsonObject> Obj; bool bParseOK=false;
-			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
-			if (FJsonSerializer::Deserialize(Reader, Obj) && Obj.IsValid()) bParseOK = true;
-
-			if (!bParseOK)
-			{
-				if (FPlatformTime::Seconds() - StartTime >= TimeoutSeconds)
-				{
-					GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
-					OnDone.ExecuteIfBound(false, TEXT(""), TEXT("JSON parse error"));
-				}
-				return;
-			}
-
-			const FString Status = Obj->GetStringField(TEXT("status"));
-
-			if (Status.Equals(TEXT("approved")))
-			{
-				GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
-				const FString SessionToken = Obj->HasField(TEXT("session_token"))
-					? Obj->GetStringField(TEXT("session_token"))
-					: TEXT("");
-				OnDone.ExecuteIfBound(true, SessionToken, TEXT(""));
-			}
-			else if (Status.Equals(TEXT("declined")) || Status.Equals(TEXT("already_registered")))
-			{
-				GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
-				OnDone.ExecuteIfBound(false, TEXT(""), FString::Printf(TEXT("Login %s"), *Status));
-			}
-			else
-			{
-				// pending
-				if (FPlatformTime::Seconds() - StartTime >= TimeoutSeconds)
-				{
-					GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
-					OnDone.ExecuteIfBound(false, TEXT(""), TEXT("Login timeout"));
-				}
-			}
-		});
-	});
-
-	GetWorld()->GetTimerManager().SetTimer(LoginPollTimer, Tick, PollIntervalSeconds, true);
-}
-
-// ----------- SHOP -----------
-
-void UAuthApiClientSubsystem::GetItemPrice(const FString& InItemId, int32 InQuantity, FOnPrice OnDone)
-{
-	const int32 Qty = FMath::Max(1, InQuantity);
-	const FString EncodedId = FGenericPlatformHttp::UrlEncode(InItemId);
-	const FString Path = FString::Printf(TEXT("/shop/price?item_id=%s&qty=%d"), *EncodedId, Qty);
-
-	SendGET(Path, [OnDone, InItemId](bool bOK, const FString& Body, const FString& Err)
-	{
-		if (!bOK)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("GetItemPrice failed: %s | body=%s"), *Err, *Body);
-			OnDone.ExecuteIfBound(false, 0, 0, InItemId, Err);
-			return;
-		}
-
-		TSharedPtr<FJsonObject> Obj; bool bParseOK=false;
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
-		if (FJsonSerializer::Deserialize(Reader, Obj) && Obj.IsValid()) bParseOK = true;
-
-		if (!bParseOK)
-		{
-			OnDone.ExecuteIfBound(false, 0, 0, InItemId, TEXT("JSON parse error"));
-			return;
-		}
-
-		const int32 Unit = Obj->GetIntegerField(TEXT("unit_price"));
-		const int32 Total = Obj->GetIntegerField(TEXT("total_price"));
-		OnDone.ExecuteIfBound(true, Unit, Total, InItemId, TEXT(""));
-	});
-}
-
-void UAuthApiClientSubsystem::PurchaseRequest(const FString& InSessionToken, const FString& InItemId, int32 InQuantity, FOnPurchaseRequested OnDone)
-{
-	const int32 Qty = FMath::Max(1, InQuantity);
-
-	auto Root = MakeShared<FJsonObject>();
-	Root->SetStringField(TEXT("item_id"), InItemId);
-	Root->SetNumberField(TEXT("quantity"), Qty);
-
-	TMap<FString,FString> Headers;
-	Headers.Add(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *InSessionToken));
-
-	SendJsonPOST(TEXT("/shop/purchase/request"), Root,
-		[OnDone](bool bOK, const FString& Body, const FString& Err)
-	{
-		if (!bOK)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("PurchaseRequest failed: %s | body=%s"), *Err, *Body);
-			OnDone.ExecuteIfBound(false, TEXT(""), Err);
-			return;
-		}
-
-		TSharedPtr<FJsonObject> Obj; bool bParseOK=false;
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
-		if (FJsonSerializer::Deserialize(Reader, Obj) && Obj.IsValid()) bParseOK = true;
-
-		if (!bParseOK)
-		{
-			OnDone.ExecuteIfBound(false, TEXT(""), TEXT("JSON parse error"));
-			return;
-		}
-
-		const FString RequestId = Obj->GetStringField(TEXT("request_id"));
-		OnDone.ExecuteIfBound(true, RequestId, TEXT(""));
-	},
-	Headers);
-}
-
-void UAuthApiClientSubsystem::PollPurchaseStatus(const FString& InRequestId, FOnPurchaseStatus OnDone, float TimeoutSeconds)
-{
-	if (!GetWorld())
-	{
-		OnDone.ExecuteIfBound(false, TEXT("unknown"), TEXT(""), TEXT("No World"));
-		return;
-	}
-
-	GetWorld()->GetTimerManager().ClearTimer(PurchasePollTimer);
-
-	const double StartTime = FPlatformTime::Seconds();
-	TWeakObjectPtr<UAuthApiClientSubsystem> WeakThis(this);
-
-	FTimerDelegate Tick;
-	Tick.BindLambda([this, WeakThis, InRequestId, OnDone, StartTime, TimeoutSeconds]()
-	{
-		if (!WeakThis.IsValid() || !GetWorld()) return;
-
-		const FString Path = FString::Printf(TEXT("/shop/purchase/status?request_id=%s"), *InRequestId);
-		SendGET(Path, [this, WeakThis, InRequestId, OnDone, StartTime, TimeoutSeconds]
-		(bool bOK, const FString& Body, const FString& Err)
-		{
-			if (!WeakThis.IsValid() || !GetWorld()) return;
-
-			if (!bOK)
-			{
-				if (FPlatformTime::Seconds() - StartTime >= TimeoutSeconds)
-				{
-					GetWorld()->GetTimerManager().ClearTimer(PurchasePollTimer);
-					OnDone.ExecuteIfBound(false, TEXT("unknown"), TEXT(""), Err.IsEmpty()?TEXT("Purchase timeout"):Err);
-				}
-				return;
-			}
-
-			TSharedPtr<FJsonObject> Obj; bool bParseOK=false;
-			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
-			if (FJsonSerializer::Deserialize(Reader, Obj) && Obj.IsValid()) bParseOK = true;
-
-			if (!bParseOK)
-			{
-				if (FPlatformTime::Seconds() - StartTime >= TimeoutSeconds)
-				{
-					GetWorld()->GetTimerManager().ClearTimer(PurchasePollTimer);
-					OnDone.ExecuteIfBound(false, TEXT("unknown"), TEXT(""), TEXT("JSON parse error"));
-				}
-				return;
-			}
-
-			const FString Status = Obj->GetStringField(TEXT("status"));
-
-			FString HumanInfo;
-			if (Obj->HasField(TEXT("item_id")))
-			{
-				const FString ItemId = Obj->GetStringField(TEXT("item_id"));
-				const int32 Qty = Obj->GetIntegerField(TEXT("quantity"));
-				const int32 Total = Obj->GetIntegerField(TEXT("total_price"));
-				HumanInfo = FString::Printf(TEXT("Item: %s x%d, Total: %d"), *ItemId, Qty, Total);
-			}
-
-			if (Status.Equals(TEXT("approved")) || Status.Equals(TEXT("declined")))
-			{
-				GetWorld()->GetTimerManager().ClearTimer(PurchasePollTimer);
-				OnDone.ExecuteIfBound(true, Status, HumanInfo, TEXT(""));
-			}
-			else
-			{
-				// pending
-				if (FPlatformTime::Seconds() - StartTime >= TimeoutSeconds)
-				{
-					GetWorld()->GetTimerManager().ClearTimer(PurchasePollTimer);
-					OnDone.ExecuteIfBound(false, TEXT("timeout"), HumanInfo, TEXT("Purchase timeout"));
-				}
-			}
-		});
-	});
-
-	GetWorld()->GetTimerManager().SetTimer(PurchasePollTimer, Tick, PollIntervalSeconds, true);
-}
-
-// ----------- Users / Inventory -----------
-
-void UAuthApiClientSubsystem::GetUserByLogin(const FString& InLogin, FOnUserByLogin OnDone)
-{
-	const FString Login = InLogin.TrimStartAndEnd();
-	if (Login.IsEmpty())
-	{
-		OnDone.ExecuteIfBound(false, TEXT(""), 0, false, 0, TEXT("Empty login"));
-		return;
-	}
-
-	const FString Enc = FGenericPlatformHttp::UrlEncode(Login);
-	const FString Path = FString::Printf(TEXT("/users/by_login?login=%s"), *Enc);
-
-	SendGET(Path, [OnDone](bool bOK, const FString& Body, const FString& Err)
-	{
-		if (!bOK)
-		{
-			OnDone.ExecuteIfBound(false, TEXT(""), 0, false, 0, Err);
-			return;
-		}
-
-		TSharedPtr<FJsonObject> Obj;
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
-		if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
-		{
-			OnDone.ExecuteIfBound(false, TEXT(""), 0, false, 0, TEXT("JSON parse error"));
-			return;
-		}
-
-		const FString LoginOut   = Obj->GetStringField(TEXT("login"));
-		const int64   ChatIdOut  = static_cast<int64>(Obj->GetNumberField(TEXT("telegram_chat_id")));
-		const bool    Verified   = Obj->GetBoolField(TEXT("verified"));
-		const int64   Gold       = static_cast<int64>(Obj->GetNumberField(TEXT("gold")));
-
-		OnDone.ExecuteIfBound(true, LoginOut, ChatIdOut, Verified, Gold, TEXT(""));
-	});
-}
-
-void UAuthApiClientSubsystem::GetInventoryByChatId(int64 ChatId, FOnInventory OnDone)
-{
-	if (ChatId <= 0)
-	{
-		OnDone.ExecuteIfBound(false, 0, {}, TEXT("Bad chat id"));
-		return;
-	}
-
-	const FString Path = FString::Printf(TEXT("/users/%lld/inventory"), ChatId);
-
-	SendGET(Path, [OnDone](bool bOK, const FString& Body, const FString& Err)
-	{
-		if (!bOK)
-		{
-			OnDone.ExecuteIfBound(false, 0, {}, Err);
-			return;
-		}
-
-		TSharedPtr<FJsonObject> Obj;
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
-		if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
-		{
-			OnDone.ExecuteIfBound(false, 0, {}, TEXT("JSON parse error"));
-			return;
-		}
-
-		const int64 Gold = static_cast<int64>(Obj->GetNumberField(TEXT("gold")));
-
-		TArray<FServerInventoryItem> Items;
-		const TArray<TSharedPtr<FJsonValue>>* JsonItemsPtr = nullptr;
-		if (Obj->TryGetArrayField(TEXT("items"), JsonItemsPtr) && JsonItemsPtr)
-		{
-			for (const TSharedPtr<FJsonValue>& V : *JsonItemsPtr)
-			{
-				const TSharedPtr<FJsonObject> ItObj = V->AsObject();
-				if (!ItObj.IsValid()) continue;
-
-				FServerInventoryItem It;
-				It.Id = ItObj->GetStringField(TEXT("id"));
-				It.Name = ItObj->GetStringField(TEXT("name"));
-				It.Quantity = ItObj->GetIntegerField(TEXT("quantity"));
-				Items.Add(MoveTemp(It));
-			}
-		}
-
-		OnDone.ExecuteIfBound(true, Gold, MoveTemp(Items), TEXT(""));
-	});
-}
-
-void UAuthApiClientSubsystem::GetInventoryByLogin(const FString& InLogin, FOnInventory OnDone)
-{
-	GetUserByLogin(InLogin, FOnUserByLogin::CreateLambda(
-		[this, OnDone](bool bOK, FString /*Login*/, int64 ChatId, bool /*Verified*/, int64 /*Gold*/, FString Err)
-	{
-		if (!bOK)
-		{
-			OnDone.ExecuteIfBound(false, 0, {}, Err);
-			return;
-		}
-		this->GetInventoryByChatId(ChatId, OnDone);
-	}));
-}
-
-/////////////////////////////////////////////////////
-// HTTP helpers
-
-void UAuthApiClientSubsystem::SendJsonPOST(const FString& UrlPath, const TSharedRef<FJsonObject>& JsonBody,
+// --------------------- Core HTTP ---------------------
+void UAuthApiClientSubsystem::SendJsonPOST(
+	const FString& UrlPath,
+	const TSharedRef<FJsonObject>& JsonBody,
 	TFunction<void(bool, const FString&, const FString&)> OnDone,
 	const TMap<FString, FString>& ExtraHeaders)
 {
-	FString BodyString;
-	{
-		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&BodyString);
-		FJsonSerializer::Serialize(JsonBody, Writer);
-	}
-
 	const FString Url = MakeUrl(UrlPath);
 
-	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
-	Request->SetURL(Url);
-	Request->SetVerb(TEXT("POST"));
-	Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+	FString BodyStr;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&BodyStr);
+	FJsonSerializer::Serialize(JsonBody, Writer);
+
+	auto Req = FHttpModule::Get().CreateRequest();
+	Req->SetURL(Url);
+	Req->SetVerb(TEXT("POST"));
+	Req->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
 	for (const auto& Kvp : ExtraHeaders)
 	{
-		Request->SetHeader(Kvp.Key, Kvp.Value);
+		Req->SetHeader(Kvp.Key, Kvp.Value);
 	}
-	Request->SetContentAsString(BodyString);
+	Req->SetContentAsString(BodyStr);
 
-	Request->OnProcessRequestComplete().BindLambda(
-		[OnDone, Url](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSucceeded)
-	{
-		if (!bSucceeded || !Resp.IsValid())
+	Req->OnProcessRequestComplete().BindLambda(
+		[OnDone](FHttpRequestPtr, FHttpResponsePtr Res, bool bOk)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("HTTP POST failed: %s | no response"), *Url);
-			OnDone(false, TEXT(""), TEXT("HTTP error (no response)"));
-			return;
-		}
-
-		const int32 Code = Resp->GetResponseCode();
-		const FString RespBody = Resp->GetContentAsString();
-		UE_LOG(LogTemp, Verbose, TEXT("HTTP %d %s -> %s"), Code, *Url, *RespBody);
-
-		if (Code >= 200 && Code < 300)
-		{
-			OnDone(true, RespBody, TEXT(""));
-		}
-		else
-		{
-			OnDone(false, RespBody, FString::Printf(TEXT("HTTP %d"), Code));
-		}
-	});
-	Request->ProcessRequest();
+			if (!bOk || !Res.IsValid())
+			{
+				OnDone(false, FString(), TEXT("HTTP error"));
+				return;
+			}
+			if (Res->GetResponseCode() < 200 || Res->GetResponseCode() >= 300)
+			{
+				OnDone(false, FString(), FString::Printf(TEXT("HTTP %d"), Res->GetResponseCode()));
+				return;
+			}
+			OnDone(true, Res->GetContentAsString(), FString());
+		});
+	Req->ProcessRequest();
 }
 
-void UAuthApiClientSubsystem::SendGET(const FString& UrlPathWithQuery,
+void UAuthApiClientSubsystem::SendGET(
+	const FString& UrlPathWithQuery,
 	TFunction<void(bool, const FString&, const FString&)> OnDone,
 	const TMap<FString, FString>& ExtraHeaders)
 {
 	const FString Url = MakeUrl(UrlPathWithQuery);
 
-	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
-	Request->SetURL(Url);
-	Request->SetVerb(TEXT("GET"));
+	auto Req = FHttpModule::Get().CreateRequest();
+	Req->SetURL(Url);
+	Req->SetVerb(TEXT("GET"));
 	for (const auto& Kvp : ExtraHeaders)
 	{
-		Request->SetHeader(Kvp.Key, Kvp.Value);
+		Req->SetHeader(Kvp.Key, Kvp.Value);
 	}
 
-	Request->OnProcessRequestComplete().BindLambda(
-		[OnDone, Url](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bSucceeded)
+	Req->OnProcessRequestComplete().BindLambda(
+		[OnDone](FHttpRequestPtr, FHttpResponsePtr Res, bool bOk)
+		{
+			if (!bOk || !Res.IsValid())
+			{
+				OnDone(false, FString(), TEXT("HTTP error"));
+				return;
+			}
+			if (Res->GetResponseCode() < 200 || Res->GetResponseCode() >= 300)
+			{
+				OnDone(false, FString(), FString::Printf(TEXT("HTTP %d"), Res->GetResponseCode()));
+				return;
+			}
+			OnDone(true, Res->GetContentAsString(), FString());
+		});
+	Req->ProcessRequest();
+}
+
+void UAuthApiClientSubsystem::ParseJson(const FString& Text, TSharedPtr<FJsonObject>& OutObject, bool& bOutOK, FString& OutError) const
+{
+	OutObject.Reset();
+	bOutOK = false;
+	OutError.Empty();
+
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
+	TSharedPtr<FJsonObject> Obj;
+	if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
 	{
-		if (!bSucceeded || !Resp.IsValid())
-		{
-			UE_LOG(LogTemp, Warning, TEXT("HTTP GET failed: %s | no response"), *Url);
-			OnDone(false, TEXT(""), TEXT("HTTP error (no response)"));
-			return;
-		}
+		OutError = TEXT("Invalid JSON");
+		return;
+	}
+	OutObject = Obj;
+	bOutOK = true;
+}
 
-		const int32 Code = Resp->GetResponseCode();
-		const FString RespBody = Resp->GetContentAsString();
-		UE_LOG(LogTemp, Verbose, TEXT("HTTP %d %s -> %s"), Code, *Url, *RespBody);
+// --------------------- Health ---------------------
+void UAuthApiClientSubsystem::CheckHealth(TFunction<void(bool bOK)> OnDone)
+{
+	SendGET(TEXT("/health"),
+		[OnDone](bool bOK, const FString& Body, const FString& Err)
+		{
+			OnDone(bOK && Body.Contains(TEXT("\"ok\":true")));
+		});
+}
 
-		if (Code >= 200 && Code < 300)
+// --------------------- Auth ---------------------
+void UAuthApiClientSubsystem::RequestLoginByLogin(const FString& InLogin, const FString& InDescription, FOnLoginRequested OnDone)
+{
+	TSharedRef<FJsonObject> J = MakeShared<FJsonObject>();
+	J->SetStringField(TEXT("login"), InLogin);
+	if (!InDescription.IsEmpty())
+	{
+		J->SetStringField(TEXT("description"), InDescription);
+	}
+	SendJsonPOST(TEXT("/auth/request_login"), J,
+		[this, OnDone](bool bOK, const FString& Body, const FString& Err)
 		{
-			OnDone(true, RespBody, TEXT(""));
-		}
-		else
+			if (!bOK) { OnDone.ExecuteIfBound(false, FString(), Err); return; }
+			TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+			ParseJson(Body, Obj, PJ, PErr);
+			if (!PJ || !Obj.IsValid()) { OnDone.ExecuteIfBound(false, FString(), TEXT("Bad JSON")); return; }
+			const FString ReqId = Obj->GetStringField(TEXT("request_id"));
+			OnDone.ExecuteIfBound(true, ReqId, FString());
+		});
+}
+
+void UAuthApiClientSubsystem::PollLoginStatus(const FString& InRequestId, FOnLoginApproved OnDone, float TimeoutSeconds)
+{
+	if (!GetWorld()) { OnDone.ExecuteIfBound(false, FString(), TEXT("No World")); return; }
+
+	float* TimeLeft = new float(TimeoutSeconds);
+	FTimerDelegate Tick;
+	Tick.BindLambda([this, InRequestId, OnDone, TimeLeft]()
+	{
+		SendGET(FString::Printf(TEXT("/auth/status?request_id=%s"), *EncodeUrl(InRequestId)),
+			[this, OnDone, TimeLeft](bool bOK, const FString& Body, const FString& Err)
+			{
+				if (!bOK) { /* keep polling; only stop on timeout */ return; }
+				TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+				ParseJson(Body, Obj, PJ, PErr);
+				if (!PJ || !Obj.IsValid()) return;
+
+				const FString Status = Obj->GetStringField(TEXT("status"));
+				if (!Status.Equals(TEXT("pending"), ESearchCase::IgnoreCase))
+				{
+					GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
+					FString Token;
+					if (Status.Equals(TEXT("approved"), ESearchCase::IgnoreCase))
+					{
+						Token = Obj->GetStringField(TEXT("session_token"));
+						OnDone.ExecuteIfBound(true, Token, FString());
+					}
+					else
+					{
+						OnDone.ExecuteIfBound(false, FString(), Status);
+					}
+					delete TimeLeft;
+				}
+			});
+
+		*TimeLeft -= PollIntervalSeconds;
+		if (*TimeLeft <= 0.f)
 		{
-			OnDone(false, RespBody, FString::Printf(TEXT("HTTP %d"), Code));
+			GetWorld()->GetTimerManager().ClearTimer(LoginPollTimer);
+			OnDone.ExecuteIfBound(false, FString(), TEXT("timeout"));
+			delete TimeLeft;
 		}
 	});
-	Request->ProcessRequest();
+
+	GetWorld()->GetTimerManager().SetTimer(LoginPollTimer, Tick, PollIntervalSeconds, true);
+}
+
+// --------------------- Shop ---------------------
+void UAuthApiClientSubsystem::GetItemPrice(const FString& InItemId, int32 InQuantity, FOnPrice OnDone)
+{
+	const int32 Qty = FMath::Max(1, InQuantity);
+	SendGET(FString::Printf(TEXT("/shop/price?item_id=%s&qty=%d"), *EncodeUrl(InItemId), Qty),
+		[this, OnDone, InItemId](bool bOK, const FString& Body, const FString& Err)
+		{
+			if (!bOK) { OnDone.ExecuteIfBound(false, 0, 0, InItemId, Err); return; }
+			TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+			ParseJson(Body, Obj, PJ, PErr);
+			if (!PJ || !Obj.IsValid()) { OnDone.ExecuteIfBound(false, 0, 0, InItemId, TEXT("Bad JSON")); return; }
+			const int32 Unit = Obj->GetIntegerField(TEXT("unit_price"));
+			const int32 Total = Obj->GetIntegerField(TEXT("total_price"));
+			OnDone.ExecuteIfBound(true, Unit, Total, InItemId, FString());
+		});
+}
+
+void UAuthApiClientSubsystem::PurchaseRequest(const FString& InSessionToken, const FString& InItemId, int32 InQuantity,
+                                              FOnPurchaseRequested OnDone)
+{
+	TSharedRef<FJsonObject> J = MakeShared<FJsonObject>();
+	J->SetStringField(TEXT("item_id"), InItemId);
+	J->SetNumberField(TEXT("quantity"), FMath::Max(1, InQuantity));
+
+	TMap<FString,FString> Headers;
+	Headers.Add(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *InSessionToken));
+
+	SendJsonPOST(TEXT("/shop/purchase/request"), J,
+		[this, OnDone](bool bOK, const FString& Body, const FString& Err)
+		{
+			if (!bOK) { OnDone.ExecuteIfBound(false, FString(), Err); return; }
+			TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+			ParseJson(Body, Obj, PJ, PErr);
+			if (!PJ || !Obj.IsValid()) { OnDone.ExecuteIfBound(false, FString(), TEXT("Bad JSON")); return; }
+			const FString ReqId = Obj->GetStringField(TEXT("request_id"));
+			OnDone.ExecuteIfBound(true, ReqId, FString());
+		}, Headers);
+}
+
+void UAuthApiClientSubsystem::PollPurchaseStatus(const FString& InRequestId, FOnPurchaseStatus OnDone, float TimeoutSeconds)
+{
+	if (!GetWorld()) { OnDone.ExecuteIfBound(false, TEXT(""), TEXT(""), TEXT("No World")); return; }
+
+	float* TimeLeft = new float(TimeoutSeconds);
+	FTimerDelegate Tick;
+	Tick.BindLambda([this, InRequestId, OnDone, TimeLeft]()
+	{
+		SendGET(FString::Printf(TEXT("/shop/purchase/status?request_id=%s"), *EncodeUrl(InRequestId)),
+			[this, OnDone, TimeLeft](bool bOK, const FString& Body, const FString& Err)
+			{
+				if (!bOK) { return; }
+				TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+				ParseJson(Body, Obj, PJ, PErr);
+				if (!PJ || !Obj.IsValid()) return;
+
+				const FString Status = Obj->GetStringField(TEXT("status"));
+				if (!Status.Equals(TEXT("pending"), ESearchCase::IgnoreCase))
+				{
+					GetWorld()->GetTimerManager().ClearTimer(PurchasePollTimer);
+
+					// скомпонуємо короткий human text з полів
+					FString Human;
+					if (Obj->HasTypedField<EJson::String>(TEXT("item_id")))
+					{
+						const FString ItemId = Obj->GetStringField(TEXT("item_id"));
+						const int32 Qty = Obj->GetIntegerField(TEXT("quantity"));
+						const int32 Unit = Obj->GetIntegerField(TEXT("unit_price"));
+						const int32 Total = Obj->GetIntegerField(TEXT("total_price"));
+						Human = FString::Printf(TEXT("%s x%d @ %d = %d"), *ItemId, Qty, Unit, Total);
+					}
+
+					OnDone.ExecuteIfBound(Status.Equals(TEXT("approved"), ESearchCase::IgnoreCase), Status, Human, FString());
+					delete TimeLeft;
+				}
+			});
+
+		*TimeLeft -= PollIntervalSeconds;
+		if (*TimeLeft <= 0.f)
+		{
+			GetWorld()->GetTimerManager().ClearTimer(PurchasePollTimer);
+			OnDone.ExecuteIfBound(false, TEXT("timeout"), TEXT(""), TEXT(""));
+			delete TimeLeft;
+		}
+	});
+
+	GetWorld()->GetTimerManager().SetTimer(PurchasePollTimer, Tick, PollIntervalSeconds, true);
+}
+
+// --------------------- User / Inventory ---------------------
+void UAuthApiClientSubsystem::GetUserByLogin(const FString& InLogin,
+	TFunction<void(bool, int64, const FString&)> OnDone)
+{
+	SendGET(FString::Printf(TEXT("/users/by_login?login=%s"), *EncodeUrl(InLogin)),
+		[this, OnDone](bool bOK, const FString& Body, const FString& Err)
+		{
+			if (!bOK) { OnDone(false, 0, Err); return; }
+			TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+			ParseJson(Body, Obj, PJ, PErr);
+			if (!PJ || !Obj.IsValid()) { OnDone(false, 0, TEXT("Bad JSON")); return; }
+			const int64 ChatId = (int64)Obj->GetNumberField(TEXT("telegram_chat_id"));
+			OnDone(true, ChatId, FString());
+		});
+}
+
+void UAuthApiClientSubsystem::GetInventoryByChatId(int64 ChatId,
+	TFunction<void(bool, int64, const TArray<FServerInventoryItem>&, const FString&)> OnDone)
+{
+	SendGET(FString::Printf(TEXT("/users/%lld/inventory"), (long long)ChatId),
+		[this, OnDone](bool bOK, const FString& Body, const FString& Err)
+		{
+			if (!bOK) { OnDone(false, 0, {}, Err); return; }
+			TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+			ParseJson(Body, Obj, PJ, PErr);
+			if (!PJ || !Obj.IsValid()) { OnDone(false, 0, {}, TEXT("Bad JSON")); return; }
+
+			const int64 Gold = (int64)Obj->GetNumberField(TEXT("gold"));
+			TArray<FServerInventoryItem> Items;
+
+			const TArray<TSharedPtr<FJsonValue>>* Arr;
+			if (Obj->TryGetArrayField(TEXT("items"), Arr))
+			{
+				for (const auto& V : *Arr)
+				{
+					const TSharedPtr<FJsonObject>* ItObj;
+					if (V->TryGetObject(ItObj))
+					{
+						FServerInventoryItem It;
+						It.Id = (*ItObj)->GetStringField(TEXT("id"));
+						It.Name = (*ItObj)->GetStringField(TEXT("name"));
+						It.Quantity = (int32)(*ItObj)->GetNumberField(TEXT("quantity"));
+						Items.Add(It);
+					}
+				}
+			}
+			OnDone(true, Gold, Items, FString());
+		});
+}
+
+void UAuthApiClientSubsystem::GetInventoryByLogin(const FString& InLogin,
+	TFunction<void(bool, int64, const TArray<FServerInventoryItem>&, const FString&)> OnDone)
+{
+	GetUserByLogin(InLogin, [this, OnDone](bool bOK, int64 ChatId, const FString& Err)
+	{
+		if (!bOK) { OnDone(false, 0, {}, Err); return; }
+		GetInventoryByChatId(ChatId, OnDone);
+	});
+}
+
+// --------------------- Trades ---------------------
+void UAuthApiClientSubsystem::TradeCreate(const FString& InSessionToken, int64 ToChatId,
+	const TArray<FString>& OfferItems, const TArray<FString>& RequestItems, FOnTradeCreated OnDone)
+{
+	TSharedRef<FJsonObject> J = MakeShared<FJsonObject>();
+	J->SetNumberField(TEXT("to"), (double)ToChatId);
+
+	// offer_items
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (const FString& S : OfferItems)
+		{
+			Arr.Add(MakeShared<FJsonValueString>(S));
+		}
+		J->SetArrayField(TEXT("offer_items"), Arr);
+	}
+	// request_items
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (const FString& S : RequestItems)
+		{
+			Arr.Add(MakeShared<FJsonValueString>(S));
+		}
+		J->SetArrayField(TEXT("request_items"), Arr);
+	}
+
+	TMap<FString,FString> Headers;
+	Headers.Add(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *InSessionToken));
+
+	SendJsonPOST(TEXT("/trade/create"), J,
+		[this, OnDone](bool bOK, const FString& Body, const FString& Err)
+		{
+			if (!bOK) { OnDone.ExecuteIfBound(false, FString(), Err); return; }
+			TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+			ParseJson(Body, Obj, PJ, PErr);
+			if (!PJ || !Obj.IsValid()) { OnDone.ExecuteIfBound(false, FString(), TEXT("Bad JSON")); return; }
+			const FString TradeId = Obj->GetStringField(TEXT("trade_id"));
+			OnDone.ExecuteIfBound(true, TradeId, FString());
+		}, Headers);
+}
+
+void UAuthApiClientSubsystem::PollTradeStatus(const FString& InTradeId, FOnTradeStatus OnDone, float TimeoutSeconds)
+{
+	if (!GetWorld()) { OnDone.ExecuteIfBound(false, TEXT(""), TEXT("No World")); return; }
+
+	float* TimeLeft = new float(TimeoutSeconds);
+	FTimerDelegate Tick;
+	Tick.BindLambda([this, InTradeId, OnDone, TimeLeft]()
+	{
+		SendGET(FString::Printf(TEXT("/trade/status?trade_id=%s"), *EncodeUrl(InTradeId)),
+			[this, OnDone, TimeLeft](bool bOK, const FString& Body, const FString& Err)
+			{
+				if (!bOK) { return; }
+				TSharedPtr<FJsonObject> Obj; bool PJ=false; FString PErr;
+				ParseJson(Body, Obj, PJ, PErr);
+				if (!PJ || !Obj.IsValid()) return;
+
+				const FString Status = Obj->GetStringField(TEXT("status"));
+				if (!Status.Equals(TEXT("pending"), ESearchCase::IgnoreCase))
+				{
+					GetWorld()->GetTimerManager().ClearTimer(TradePollTimer);
+					OnDone.ExecuteIfBound(Status.Equals(TEXT("approved"), ESearchCase::IgnoreCase), Status, FString());
+					delete TimeLeft;
+				}
+			});
+
+		*TimeLeft -= PollIntervalSeconds;
+		if (*TimeLeft <= 0.f)
+		{
+			GetWorld()->GetTimerManager().ClearTimer(TradePollTimer);
+			OnDone.ExecuteIfBound(false, TEXT("timeout"), TEXT(""));
+			delete TimeLeft;
+		}
+	});
+
+	GetWorld()->GetTimerManager().SetTimer(TradePollTimer, Tick, PollIntervalSeconds, true);
 }

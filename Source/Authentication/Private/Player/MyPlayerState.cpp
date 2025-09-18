@@ -14,16 +14,39 @@ AMyPlayerState::AMyPlayerState(const FObjectInitializer& ObjectInitializer)
 	SetNetUpdateFrequency(100.0f);
 }
 
-void AMyPlayerState::OnRep_PlayerChatId(FString InPlayerChatId)
+void AMyPlayerState::SetPlayerChatId(const FString& InPlayerChatId)
 {
-	PlayerChatId = InPlayerChatId;
-	OnPlayerChatIdChanged.Broadcast(PlayerChatId);
+	if (HasAuthority())
+	{
+		PlayerChatId = InPlayerChatId;
+		OnRep_PlayerChatId();
+	}
 }
 
-void AMyPlayerState::OnRep_SessionToken(FString InSessionToken)
+void AMyPlayerState::SetSessionToken(const FString& InSessionToken)
 {
-	SessionToken = InSessionToken;
-	OnSessionTokenChanged.Broadcast(SessionToken);
+	if (HasAuthority())
+	{
+		SessionToken = InSessionToken;
+		OnRep_SessionToken();
+	}
+}
+
+void AMyPlayerState::OnRep_PlayerChatId()
+{
+	OnPlayerChatIdChanged.Broadcast(GetPlayerChatId());
+}
+
+void AMyPlayerState::OnRep_SessionToken()
+{
+	OnSessionTokenChanged.Broadcast(GetSessionToken());
+}
+
+void AMyPlayerState::OnRep_PlayerName()
+{
+	Super::OnRep_PlayerName();
+
+	OnPlayerNameChanged.Broadcast(PlayerChatId);
 }
 
 void AMyPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -31,4 +54,5 @@ void AMyPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(AMyPlayerState, PlayerChatId);
+	DOREPLIFETIME(AMyPlayerState, SessionToken);
 }

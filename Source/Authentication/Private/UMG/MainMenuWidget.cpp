@@ -12,7 +12,18 @@ void UMainMenuWidget::NativeConstruct()
 
 	if (PlayerNameText)
 	{
+		AMyPlayerState* PS = GetOwningPlayerState<AMyPlayerState>();
+		PS->OnPlayerNameChanged.AddUniqueDynamic(this, &ThisClass::UpdatePlayerName);
+
+		PlayerNameText->SetText(FText::FromString(PS->GetPlayerName()));
+	}
+}
+
+void UMainMenuWidget::UpdatePlayerName(const FString& InPlayerName)
+{
+	if (PlayerNameText)
+	{
 		const AMyPlayerState* PS = GetOwningPlayerState<AMyPlayerState>();
-		PlayerNameText->SetText(FText::FromString(PS->GetPlayerNameCustom()));
+		PlayerNameText->SetText(FText::FromString(PS->GetPlayerName()));
 	}
 }

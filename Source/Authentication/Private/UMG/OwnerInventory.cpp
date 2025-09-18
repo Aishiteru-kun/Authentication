@@ -22,7 +22,9 @@ void UOwnerInventory::OnActivate_Implementation()
 
 	UAuthApiClientSubsystem* Subsystem = GetGameInstance()->GetSubsystem<UAuthApiClientSubsystem>();
 
-	Subsystem->GetInventoryByLogin(FullId, FOnInventory::CreateUObject(this, &ThisClass::OnInventory));
+	Subsystem->GetInventoryByLogin(FullId, [this](bool bOK, int64 Gold, TArray<FServerInventoryItem> Items, FString Err) {
+		OnInventory(bOK, Gold, Items, Err);
+	});
 }
 
 void UOwnerInventory::OnDeactivate_Implementation()

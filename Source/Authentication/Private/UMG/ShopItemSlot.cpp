@@ -39,6 +39,11 @@ void UShopItemSlot::SetOnlyPriceMode(bool bInShowOnlyPrice)
 	QuantityText->SetVisibility(bShowOnlyPrice ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
 }
 
+void UShopItemSlot::ShowPrice(bool InShowPrice)
+{
+	GoldPriceText->SetVisibility(bShowOnlyPrice ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+}
+
 FText UShopItemSlot::GetItemName() const
 {
 	return ItemNameText->GetText();

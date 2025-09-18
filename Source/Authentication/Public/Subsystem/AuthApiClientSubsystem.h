@@ -6,6 +6,16 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "AuthApiClientSubsystem.generated.h"
 
+// ---- Delegates (залишені як були) ----
+DECLARE_DELEGATE_ThreeParams(FOnLoginRequested, bool /*bOK*/, FString /*RequestId*/, FString /*ErrorText*/);
+DECLARE_DELEGATE_ThreeParams(FOnLoginApproved, bool /*bOK*/, FString /*SessionToken*/, FString /*ErrorText*/);
+DECLARE_DELEGATE_FiveParams(FOnPrice, bool /*bOK*/, int32 /*UnitPrice*/, int32 /*TotalPrice*/, FString /*ItemId*/,
+                            FString /*ErrorText*/);
+DECLARE_DELEGATE_ThreeParams(FOnPurchaseRequested, bool /*bOK*/, FString /*RequestId*/, FString /*ErrorText*/);
+DECLARE_DELEGATE_FourParams(FOnPurchaseStatus, bool /*bOK*/, FString /*Status*/, FString /*HumanInfo*/,
+                            FString /*ErrorText*/);
+
+// ---- Нові типи ----
 USTRUCT(BlueprintType)
 struct FServerInventoryItem
 {
@@ -21,17 +31,8 @@ struct FServerInventoryItem
 	int32 Quantity = 0;
 };
 
-DECLARE_DELEGATE_ThreeParams(FOnLoginRequested, bool /*bOK*/, FString /*RequestId*/, FString /*ErrorText*/);
-DECLARE_DELEGATE_ThreeParams(FOnLoginApproved,  bool /*bOK*/, FString /*SessionToken*/, FString /*ErrorText*/);
-DECLARE_DELEGATE_FiveParams(FOnPrice,           bool /*bOK*/, int32 /*UnitPrice*/, int32 /*TotalPrice*/, FString /*ItemId*/, FString /*ErrorText*/);
-DECLARE_DELEGATE_ThreeParams(FOnPurchaseRequested, bool /*bOK*/, FString /*RequestId*/, FString /*ErrorText*/);
-DECLARE_DELEGATE_FourParams(FOnPurchaseStatus,  bool /*bOK*/, FString /*Status*/, FString /*HumanInfo*/, FString /*ErrorText*/);
-
-// Діагностичне (отримати chat_id, verified, gold за логіном)
-DECLARE_DELEGATE_SixParams(FOnUserByLogin, bool/*bOK*/, FString/*Login*/, int64/*ChatId*/, bool/*Verified*/, int64/*Gold*/, FString/*Error*/);
-
-// Інвентар
-DECLARE_DELEGATE_FourParams(FOnInventory, bool/*bOK*/, int64/*Gold*/, TArray<FServerInventoryItem>/*Items*/, FString/*Error*/);
+DECLARE_DELEGATE_ThreeParams(FOnTradeCreated, bool /*bOK*/, FString /*TradeId*/, FString /*ErrorText*/);
+DECLARE_DELEGATE_ThreeParams(FOnTradeStatus, bool /*bOK*/, FString /*Status*/, FString /*ErrorText*/);
 
 UCLASS()
 class AUTHENTICATION_API UAuthApiClientSubsystem : public UGameInstanceSubsystem
@@ -39,42 +40,53 @@ class AUTHENTICATION_API UAuthApiClientSubsystem : public UGameInstanceSubsystem
 	GENERATED_BODY()
 
 public:
-	/** Наприклад, http://localhost:8080 */
 	UPROPERTY(EditAnywhere, Category="AuthAPI")
 	FString ServerBaseUrl = TEXT("http://localhost:8080");
 
-	/** Інтервал полінгу (сек) */
+	// Інтервал полінгу (сек)
 	UPROPERTY(EditAnywhere, Category="AuthAPI")
 	float PollIntervalSeconds = 1.0f;
 
-	// --- Пінг ---
+	// ---------- Health ----------
 	void CheckHealth(TFunction<void(bool bOK)> OnDone);
 
-	// --- Логін by login ---
+	// ---------- Логін ----------
 	void RequestLoginByLogin(const FString& InLogin, const FString& InDescription, FOnLoginRequested OnDone);
-
-	/** Полінг статусу логіну; повертає SessionToken, коли approved */
 	void PollLoginStatus(const FString& InRequestId, FOnLoginApproved OnDone, float TimeoutSeconds = 60.f);
 
-	// --- Магазин ---
+	// ---------- Магазин ----------
 	void GetItemPrice(const FString& InItemId, int32 InQuantity, FOnPrice OnDone);
 
 	/** Надіслати заявку на покупку (Bearer потрібен) */
-	void PurchaseRequest(const FString& InSessionToken, const FString& InItemId, int32 InQuantity, FOnPurchaseRequested OnDone);
+	void PurchaseRequest(const FString& InSessionToken, const FString& InItemId, int32 InQuantity,
+	                     FOnPurchaseRequested OnDone);
 
-	/** Полінг статусу покупки */
 	void PollPurchaseStatus(const FString& InRequestId, FOnPurchaseStatus OnDone, float TimeoutSeconds = 60.f);
 
-	// --- Користувач / інвентар ---
-	void GetUserByLogin(const FString& InLogin, FOnUserByLogin OnDone);
+	// ---------- Користувач / Інвентар ----------
+	/** Дає telegram_chat_id за логіном (для /users/<chat_id>/inventory) */
+	void GetUserByLogin(const FString& InLogin,
+	                    TFunction<void(bool /*bOK*/, int64 /*ChatId*/, const FString& /*ErrorText*/)> OnDone);
 
-	/** Якщо знаєш chat_id */
-	void GetInventoryByChatId(int64 ChatId, FOnInventory OnDone);
+	/** Прочитати інвентар за chat_id */
+	void GetInventoryByChatId(int64 ChatId,
+		TFunction<void(bool /*bOK*/, int64 /*Gold*/, const TArray<FServerInventoryItem>& /*Items*/, const FString& /*ErrorText*/)> OnDone);
 
-	/** Зручно: за логіном дістає chat_id і вже потім інвентар */
-	void GetInventoryByLogin(const FString& InLogin, FOnInventory OnDone);
+	/** Зручний хелпер: логін -> chat_id -> інвентар */
+	void GetInventoryByLogin(const FString& InLogin,
+		TFunction<void(bool /*bOK*/, int64 /*Gold*/, const TArray<FServerInventoryItem>& /*Items*/, const FString& /*ErrorText*/)> OnDone);
+
+	// ---------- Трейди ----------
+	/** Створити трейд (Bearer) */
+	void TradeCreate(const FString& InSessionToken, int64 ToChatId,
+	                 const TArray<FString>& OfferItems, const TArray<FString>& RequestItems,
+	                 FOnTradeCreated OnDone);
+
+	/** Полінг статусу трейду */
+	void PollTradeStatus(const FString& InTradeId, FOnTradeStatus OnDone, float TimeoutSeconds = 60.f);
 
 private:
+	// ---- HTTP helpers ----
 	void SendJsonPOST(const FString& UrlPath, const TSharedRef<FJsonObject>& JsonBody,
 	                  TFunction<void(bool, const FString&, const FString&)> OnDone,
 	                  const TMap<FString, FString>& ExtraHeaders = {});
@@ -83,12 +95,11 @@ private:
 	             TFunction<void(bool, const FString&, const FString&)> OnDone,
 	             const TMap<FString, FString>& ExtraHeaders = {});
 
-	/** Нормалізує базу (без фінального слеша) і гарантує, що Path починається зі слеша */
-	FString MakeUrl(const FString& Path) const;
-
+	FString MakeUrl(const FString& Path) const { return ServerBaseUrl.TrimEnd() + Path; }
 	void ParseJson(const FString& Text, TSharedPtr<FJsonObject>& OutObject, bool& bOutOK, FString& OutError) const;
 
-private:
+	// ---- Timers ----
 	FTimerHandle LoginPollTimer;
 	FTimerHandle PurchasePollTimer;
+	FTimerHandle TradePollTimer;
 };

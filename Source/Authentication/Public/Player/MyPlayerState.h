@@ -23,19 +23,24 @@ public:
 	UPROPERTY(BlueprintAssignable)
 	FOnDataChanged OnSessionTokenChanged;
 
+	UPROPERTY(BlueprintAssignable)
+	FOnDataChanged OnPlayerNameChanged;
+
 public:
 	FORCEINLINE const FString& GetPlayerChatId() const { return PlayerChatId; }
-	void SetPlayerChatId(const FString& InPlayerChatId) { PlayerChatId = InPlayerChatId; }
+	void SetPlayerChatId(const FString& InPlayerChatId);
 
 	FORCEINLINE const FString& GetSessionToken() const { return SessionToken; }
-	void SetSessionToken(const FString& InSessionToken) { SessionToken = InSessionToken; }
+	void SetSessionToken(const FString& InSessionToken);
 
 protected:
 	UFUNCTION()
-	void OnRep_PlayerChatId(FString InPlayerChatId);
+	void OnRep_PlayerChatId();
 
 	UFUNCTION()
-	void OnRep_SessionToken(FString InSessionToken);
+	void OnRep_SessionToken();
+
+	virtual void OnRep_PlayerName() override;
 
 protected:
 	UPROPERTY(ReplicatedUsing = OnRep_PlayerChatId)

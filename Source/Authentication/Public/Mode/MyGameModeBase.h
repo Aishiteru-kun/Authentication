@@ -13,5 +13,7 @@ UCLASS()
 class AUTHENTICATION_API AMyGameModeBase : public AGameModeBase
 {
 	GENERATED_BODY()
+
+public:
 	
 };

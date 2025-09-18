@@ -24,6 +24,7 @@ public:
 	virtual void SetQuantity(int32 InQuantity) const override;
 
 	void SetOnlyPriceMode(bool bInShowOnlyPrice);
+	void ShowPrice(bool InShowPrice);
 
 	FText GetItemName() const;
 	FText GetQuantity() const;

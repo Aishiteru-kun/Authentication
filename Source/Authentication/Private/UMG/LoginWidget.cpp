@@ -5,6 +5,7 @@
 
 #include "Components/EditableTextBox.h"
 #include "Components/TextBlock.h"
+#include "Player/MyPlayerController.h"
 #include "Player/MyPlayerState.h"
 #include "Subsystem/AuthApiClientSubsystem.h"
 
@@ -97,7 +98,14 @@ void ULoginWidget::RequestLoginApproved(bool bOK, FString SessionToken, FString 
 
 		return;
 	}
-	
+
+	AMyPlayerController* PC = GetOwningPlayer<AMyPlayerController>();
+	if (!PC)
+	{
+		RemoveFromParent();
+		return;
+	}
+
 	if (AMyPlayerState* PS = GetOwningPlayerState<AMyPlayerState>();
 		PS)
 	{
@@ -107,9 +115,7 @@ void ULoginWidget::RequestLoginApproved(bool bOK, FString SessionToken, FString 
 		FString Name, ChatId;
 		Login.Split("_", &Name, &ChatId);
 
-		PS->SetPlayerName(Name);
-		PS->SetPlayerChatId(ChatId);
-		PS->SetSessionToken(SessionToken);
+		PC->Server_ChangeDataForPlayerState(PS, Name, ChatId, SessionToken);
 	}
 
 	RemoveFromParent();

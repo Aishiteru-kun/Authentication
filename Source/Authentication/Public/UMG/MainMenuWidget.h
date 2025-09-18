@@ -17,6 +17,9 @@ class AUTHENTICATION_API UMainMenuWidget : public UUserWidget
 protected:
 	virtual void NativeConstruct() override;
 
+	UFUNCTION()
+	void UpdatePlayerName(const FString& InPlayerName);
+
 protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UWidgetSwitcher> MainSwitcher;
